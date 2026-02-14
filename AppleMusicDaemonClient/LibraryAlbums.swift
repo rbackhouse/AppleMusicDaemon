@@ -21,48 +21,50 @@ struct LibraryAlbums: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if viewModel.isLoading {
-                loadingView()
-                    .frame(maxHeight: 450)
-            } else {
-                HStack {
-                    Image(systemName: "magnifyingglass")
+        NavigationStack {            
+            VStack(spacing: 0) {
+                if viewModel.isLoading {
+                    loadingView()
+                        .frame(maxHeight: 450)
+                } else {
+                    HStack {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                        TextField("Search Albums", text: $searchQuery)
+                            .textFieldStyle(.plain)
+                            .modifier(ClearButton(text: $searchQuery))
+                    }
+                    .padding(8)
+#if os(iOS)
+                    .background(Color(.systemBackground))
+#elseif os(macOS)
+                    .background(Color(nsColor: .controlBackgroundColor))
+#endif
+                    .cornerRadius(8)
+                    .padding()
+                    
+                    // Results
+                    List(filteredAlbums) { album in
+                        AlbumCell(album)
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("Albums")
+#if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+#endif
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Text("\(filteredAlbums.count) albums")
                         .foregroundColor(.secondary)
-                    TextField("Search Albums", text: $searchQuery)
-                        .textFieldStyle(.plain)
-                        .modifier(ClearButton(text: $searchQuery))
+                        .font(.caption)
                 }
-                .padding(8)
-                #if os(iOS)
-                .background(Color(.systemBackground))
-                #elseif os(macOS)
-                .background(Color(nsColor: .controlBackgroundColor))
-                #endif
-                .cornerRadius(8)
-                .padding()
-                
-                // Results
-                List(filteredAlbums) { album in
-                    AlbumCell(album)
+            }
+            .onAppear() {
+                if viewModel.albums.isEmpty {
+                    viewModel.fetchAlbums()
                 }
-                .listStyle(.plain)
-            }
-        }
-        .navigationTitle("Albums")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Text("\(filteredAlbums.count) albums")
-                    .foregroundColor(.secondary)
-                    .font(.caption)
-            }
-        }
-        .onAppear() {
-            if viewModel.albums.isEmpty {
-                viewModel.fetchAlbums()
             }
         }
     }
