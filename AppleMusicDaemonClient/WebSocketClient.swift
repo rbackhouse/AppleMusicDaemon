@@ -66,12 +66,15 @@ enum PlaybackStatus: String, Codable {
 }
 
 struct StatusResponse: Codable {
-    let currentSong: Song?
-    let songs: [Song]
     let playbackStatus: PlaybackStatus
     let playbackTime: Double
     let shuffleStatus: Bool
     let repeatStatus: Bool
+}
+
+struct QueueResponse: Codable {
+    let currentSong: Song?
+    let songs: [Song]
 }
 
 enum MessageLevel: String, Codable {
@@ -107,6 +110,7 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
     private var webSocketTask: URLSessionWebSocketTask?
     private var session: URLSession!
     static let shared = WebSocketClient()
+    private var isUpdating = false
 
     func connect(url: URL) {
         self.url = url
@@ -280,8 +284,13 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
                         do {
                             let status = try decoder.decode(StatusResponse.self, from: jsonData)
                             self!.expand(status: status)
-                       } catch {
-                       }
+                        } catch {
+                        }
+                        do {
+                            let queuestate = try decoder.decode(QueueResponse.self, from: jsonData)
+                            self!.queueChanged(queuestate: queuestate)
+                        } catch {
+                        }
                         do {
                             let msg = try decoder.decode(MessageResponse.self, from: jsonData)
                             print(msg)
@@ -313,6 +322,42 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
             }
         }
     }
+
+    @MainActor
+    func queueChanged(queuestate: QueueResponse) {
+        Task {
+            guard !isUpdating else { return }
+            isUpdating = true
+
+            print("Queue changed enter")
+            if !checkSong(song1: self.currentSong, song2: queuestate.currentSong) {
+                if queuestate.currentSong != nil {
+                    self.currentSong = await getSong(queuestate.currentSong!)
+                }
+            }
+            if checkQueue(queuestate: queuestate) {
+                print("Resetting Queue")
+                self.queue.removeAll()
+                for song in queuestate.songs {
+                    let s = await getSong(song)
+                    if s != nil {
+                        self.queue.append(s!)
+                    }
+                }
+            }
+            if queuestate.currentSong != nil {
+                let x = queuestate.currentSong!
+                for i in 0..<queue.count {
+                    let y = queue[i]
+                    if x.title == y.title && x.albumTitle == y.albumTitle && x.artistName == y.artistName {
+                        currentIndex = i
+                    }
+                }
+            }
+            print("Queue changed exit")
+            isUpdating = false
+        }
+    }
     
     @MainActor
     func expand(status: StatusResponse) {
@@ -328,31 +373,6 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
         self.playbackDurationLabel = String(format: "%02d:%02d", Int(dmins), Int(dsecs))
         self.isRepeatModeOn = status.repeatStatus
         self.isShuffleOn = status.shuffleStatus
-        Task {
-            if !checkSong(song1: self.currentSong, song2: status.currentSong) {
-                if status.currentSong != nil {
-                    self.currentSong = await getSong(status.currentSong!)
-                }
-            }
-            if checkQueue(status: status) {
-                self.queue.removeAll()
-                for song in status.songs {
-                    let s = await getSong(song)
-                    if s != nil {
-                        self.queue.append(s!)
-                    }
-                }
-            }
-            if status.currentSong != nil {
-                let x = status.currentSong!
-                for i in 0..<queue.count {
-                    let y = queue[i]
-                    if x.title == y.title && x.albumTitle == y.albumTitle && x.artistName == y.artistName {
-                        currentIndex = i
-                    }
-                }
-            }
-        }
     }
     
     func checkSong(song1: Song?, song2: Song?) -> Bool {
@@ -370,28 +390,41 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
         return true
     }
     
-    func checkQueue(status: StatusResponse) -> Bool {
-        if queue.count != status.songs.count {
+    func checkQueue(queuestate: QueueResponse) -> Bool {
+        if queue.count != queuestate.songs.count {
             return true
         }
         for i in 0..<queue.count {
-            if checkSong(song1: queue[i], song2: status.songs[i]) == false {
+            if checkSong(song1: queue[i], song2: queuestate.songs[i]) == false {
                 return true
             }
         }
         return false
     }
-
+    
     func getSong(_ song: Song) async -> Song? {
         do {
-            let req = MusicCatalogResourceRequest<Song>(matching: \.id, equalTo: song.id)
+            var req = MusicCatalogResourceRequest<Song>(matching: \.id, equalTo: song.id)
+            req.limit = 1
             let resp = try await req.response()
             if resp.items.isEmpty == false {
                 return resp.items.first
             }
         } catch {
+            print("Failed to get song with title: \(song.title) artist: \(song.artistName) error: \(error)")
+            do {
+                let term = song.title + " by " + song.artistName
+                var req = MusicCatalogSearchRequest(term: term, types: [Song.self])
+                req.limit = 1
+                let resp = try await req.response()
+                if resp.songs.isEmpty == false {
+                    return resp.songs.first
+                }
+            } catch {
+                print("Failed to get song via search with title: \(song.title) artist: \(song.artistName) error: \(error)")
+            }
         }
-        return nil
+        return song
     }
 }
 

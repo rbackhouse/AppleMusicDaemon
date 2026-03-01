@@ -9,6 +9,7 @@ import Vapor
 import Observation
 import Foundation
 import MusicKit
+import Combine
 
 enum CommandType: String, Codable {
     case play
@@ -51,12 +52,15 @@ enum PlaybackStatus: String, Codable {
 }
 
 struct StatusResponse: Codable {
-    let currentSong: Song?
-    let songs: [Song]
     let playbackStatus: PlaybackStatus
     let playbackTime: Double
     let shuffleStatus: Bool
     let repeatStatus: Bool
+}
+
+struct QueueResponse: Codable {
+    let currentSong: Song?
+    let songs: [Song]
 }
 
 enum MessageLevel: String, Codable {
@@ -248,9 +252,67 @@ public struct AppleMusicService {
 class AppleMusicObservable {
     @ObservationIgnored
     private var sockets: [WebSocket] = []
+    private var queueObserver: AnyCancellable?
+
+    init() {
+        let player = ApplicationMusicPlayer.shared
+        self.queueObserver = player.queue.objectWillChange
+           .sink { [weak self] in
+               Task {
+                   await self?.queueDidChange()
+               }
+           }
+    }
+    
+    private func queueDidChange() async {
+        print("queueDidChange")
+        let player = ApplicationMusicPlayer.shared
+        var currentSong: Song? = nil
+        if let currentEntry = player.queue.currentEntry?.item {
+            switch currentEntry {
+            case .song(let s):
+                currentSong = s
+            case .musicVideo(_):
+                break
+            @unknown default:
+                break
+            }
+        }
+        var songs: [Song] = []
+        
+        for item in player.queue.entries {
+            if item.item != nil {
+                switch item.item {
+                case .song(let s):
+                    songs.append(s)
+                case .musicVideo(_):
+                    break
+                case .none:
+                    break
+                @unknown default:
+                    break
+                }
+            }
+        }
+        do {
+            let response = QueueResponse(currentSong: currentSong, songs: songs)
+            let jsonEncoder = JSONEncoder()
+            let jsonData = try jsonEncoder.encode(response)
+            let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
+            
+            for ws in sockets {
+                try? await ws.send(jsonString)
+            }
+        } catch {
+            
+        }
+    }
     
     func addWS(_ ws: WebSocket) {
         sockets.append(ws)
+        Task {
+            await queueDidChange()
+        }
     }
     
     func removeWS(_ ws: WebSocket) {
@@ -274,19 +336,6 @@ class AppleMusicObservable {
     func startTimer() async throws {
         while true {
             let player = ApplicationMusicPlayer.shared
-            //var currentId = "None"
-            var currentSong: Song? = nil
-            if let currentEntry = player.queue.currentEntry?.item {
-                //currentId = currentEntry.id.rawValue
-                switch currentEntry {
-                case .song(let s):
-                    currentSong = s
-                case .musicVideo(_):
-                    break
-                @unknown default:
-                    break
-                }
-            }
             let playbackTime = player.playbackTime
             var playbackStatus: PlaybackStatus
             switch player.state.playbackStatus {
@@ -324,30 +373,7 @@ class AppleMusicObservable {
                     shuffleStatus = true
             }
 
-            //var ids: [String] = []
-            var songs: [Song] = []
-            
-            for item in player.queue.entries {
-                if item.item != nil {
-                    switch item.item {
-                    case .song(let s):
-                        songs.append(s)
-                    case .musicVideo(_):
-                        break
-                    case .none:
-                        break
-                    @unknown default:
-                        break
-                    }
-                    /*
-                    let id = item.item?.id.rawValue ?? "None"
-                    if id != "None" {
-                        ids.append(id)
-                    }
-                    */
-                }
-            }
-            let response = StatusResponse(currentSong: currentSong, songs: songs, playbackStatus: playbackStatus, playbackTime: playbackTime, shuffleStatus: shuffleStatus, repeatStatus: repeatStatus)
+            let response = StatusResponse(playbackStatus: playbackStatus, playbackTime: playbackTime, shuffleStatus: shuffleStatus, repeatStatus: repeatStatus)
             //print(response)
             let jsonEncoder = JSONEncoder()
             let jsonData = try jsonEncoder.encode(response)
