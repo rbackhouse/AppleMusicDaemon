@@ -111,47 +111,80 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
     private var session: URLSession!
     static let shared = WebSocketClient()
     private var isUpdating = false
+    private var shouldReconnect = false
 
     func connect(url: URL) {
+        shouldReconnect = true
         self.url = url
-        session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
+        if session == nil {
+            session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
+        }
+        // Drop any previous task first (e.g. switching hosts). Nil-ing it first
+        // makes its trailing callbacks "stale" so they're ignored.
+        let old = webSocketTask
+        webSocketTask = nil
+        old?.cancel(with: .goingAway, reason: nil)
+
         webSocketTask = session.webSocketTask(with: url)
         webSocketTask?.resume()
-        isConnected = true
         listenForMessages()
     }
 
     func disconnect() {
-        webSocketTask?.cancel(with: .goingAway, reason: "Closing connection".data(using: .utf8))
+        shouldReconnect = false
+        let task = webSocketTask
         webSocketTask = nil
+        task?.cancel(with: .goingAway, reason: "Closing connection".data(using: .utf8))
         isConnected = false
     }
-    
-    private func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWith protocol: String?) {
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+        guard webSocketTask === self.webSocketTask else { return }
         print("WebSocket Connected!")
+        isConnected = true
         sendPing()
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         print("Disconnected: \(closeCode)")
+        handleConnectionLost(webSocketTask)
+    }
+
+    // Hard failures (server down, network drop) arrive here, not in didCloseWith.
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error { print("Connection failed: \(error.localizedDescription)") }
+        handleConnectionLost(task)
+    }
+
+    /// Idempotent: only the first report for the current task does anything.
+    private func handleConnectionLost(_ task: URLSessionTask) {
+        guard task === webSocketTask else { return }   // stale or already handled
+        webSocketTask = nil
+        task.cancel()
+        isConnected = false
+        guard shouldReconnect else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            self?.connect(url: self!.url)
+            guard let self, self.shouldReconnect, self.webSocketTask == nil else { return }
+            self.connect(url: self.url)
         }
     }
 
     func sendPing() {
-        webSocketTask?.sendPing { error in
-            if let error = error {
+        guard let task = webSocketTask else { return }
+        task.sendPing { [weak self] error in
+            guard let self, task === self.webSocketTask else { return }
+            if let error {
                 print("Ping failed: \(error)")
-                self.disconnect() // Disconnected if ping fails
+                self.handleConnectionLost(task)   // reconnects, unlike disconnect()
             } else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
-                    self?.sendPing()
+                    guard let self, task === self.webSocketTask else { return }
+                    self.sendPing()
                 }
             }
         }
     }
-    
+
     func play() {
         self.runCommand(commandType: .play)
     }
@@ -260,20 +293,23 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
     }
     
     private func listenForMessages() {
-        webSocketTask?.receive { [weak self] result in
+        guard let task = webSocketTask else { return }
+        task.receive { [weak self] result in
+            // Ignore results from a task we've already replaced or torn down.
+            guard let strong = self, task === strong.webSocketTask else { return }
             switch result {
             case .failure(let error):
                 print("Receive error: \(error.localizedDescription)")
                 Task { @MainActor [weak self] in
                     guard let self = self else { return }
-                    
-                    self.toastItem = ToastItem(
-                        level: .error,
-                        title: "Error",
-                        message: error.localizedDescription
-                    )
-                    
-                    self.disconnect()
+                    if self.isConnected {   // avoid a toast per failed retry
+                        self.toastItem = ToastItem(
+                            level: .error,
+                            title: "Error",
+                            message: error.localizedDescription
+                        )
+                    }
+                    self.handleConnectionLost(task)
                 }
             case .success(let message):
                 switch message {

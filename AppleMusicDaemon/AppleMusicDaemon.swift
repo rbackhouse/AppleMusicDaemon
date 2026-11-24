@@ -246,6 +246,45 @@ public struct AppleMusicService {
                 }
         }
     }
+
+    enum RequestError: LocalizedError {
+        case unrecognized
+
+        var errorDescription: String? {
+            switch self {
+            case .unrecognized: return "Unrecognized request"
+            }
+        }
+    }
+
+    /// Decodes one client request and runs it. Decode misses just fall through to
+    /// the next type; anything thrown by a service call propagates to the caller.
+    /// Returns nil for requests that have no reply message (player commands).
+    func handle(_ data: Data) async throws -> MessageResponse? {
+        let decoder = JSONDecoder()
+        if let req = try? decoder.decode(QueueSong.self, from: data) {
+            print("Received: \(req)")
+            return try await queueSong(song: req.song, append: req.append)
+        }
+        if let req = try? decoder.decode(QueueAlbum.self, from: data) {
+            print("Received: \(req)")
+            return try await queueAlbum(album: req.album, append: req.append)
+        }
+        if let req = try? decoder.decode(QueuePlaylist.self, from: data) {
+            print("Received: \(req)")
+            return try await queuePlaylist(playlist: req.playlist)
+        }
+        if let req = try? decoder.decode(QueueStation.self, from: data) {
+            print("Received: \(req)")
+            return try await queueStation(station: req.station)
+        }
+        if let req = try? decoder.decode(CommandRequest.self, from: data) {
+            print("Received: \(req)")
+            try await runCommand(request: req)
+            return nil
+        }
+        throw RequestError.unrecognized
+    }
 }
 
 @Observable
@@ -406,43 +445,20 @@ public struct AppleMusicDaemon: Sendable {
             
             ws.onText { ws, text async in
                 let jsonData = Data(text.utf8)
-                let decoder = JSONDecoder()
-                
+
                 Task { @MainActor in
                     do {
-                        let queueReq = try decoder.decode(QueueSong.self, from: jsonData)
-                        print("Received: \(queueReq)")
-                        let service = AppleMusicService()
-                        let msg = try await service.queueSong(song: queueReq.song, append: queueReq.append)
-                        sendMessage(msg)
-                    } catch {}
-                    do {
-                        let queueReq = try decoder.decode(QueueAlbum.self, from: jsonData)
-                        print("Received: \(queueReq)")
-                        let service = AppleMusicService()
-                        let msg = try await service.queueAlbum(album: queueReq.album, append: queueReq.append)
-                        sendMessage(msg)
-                    } catch {}
-                    do {
-                        let queueReq = try decoder.decode(QueuePlaylist.self, from: jsonData)
-                        print("Received: \(queueReq)")
-                        let service = AppleMusicService()
-                        let msg = try await service.queuePlaylist(playlist: queueReq.playlist)
-                        sendMessage(msg)
-                    } catch {}
-                    do {
-                        let queueReq = try decoder.decode(QueueStation.self, from: jsonData)
-                        print("Received: \(queueReq)")
-                        let service = AppleMusicService()
-                        let msg = try await service.queueStation(station: queueReq.station)
-                        sendMessage(msg)
-                    } catch {}
-                    do {
-                        let commandReq = try decoder.decode(CommandRequest.self, from: jsonData)
-                        print("Received: \(commandReq)")
-                        let service = AppleMusicService()
-                        try await service.runCommand(request: commandReq)
-                    } catch {}
+                        if let msg = try await AppleMusicService().handle(jsonData) {
+                            sendMessage(msg)
+                        }
+                    } catch {
+                        print("Request failed: \(error)")
+                        sendMessage(MessageResponse(
+                            level: .error,
+                            title: "Request Failed",
+                            message: error.localizedDescription
+                        ))
+                    }
                 }
             }
             
