@@ -90,6 +90,23 @@ struct MessageResponse: Codable {
     let message: String
 }
 
+/// Everything the client can send. Synthesized Codable wraps each case, e.g.
+/// {"queueSong":{"_0":{"song":{...},"append":true}}} -- keep in sync with the server.
+enum ClientMessage: Codable {
+    case queueSong(QueueSong)
+    case queueAlbum(QueueAlbum)
+    case queuePlaylist(QueuePlaylist)
+    case queueStation(QueueStation)
+    case command(CommandRequest)
+}
+
+/// Everything the server can send. Keep in sync with the server.
+enum ServerMessage: Codable {
+    case status(StatusResponse)
+    case queue(QueueResponse)
+    case message(MessageResponse)
+}
+
 class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate {
     @Published var queue: [MusicKit.Song] = []
     @Published var playbackStatus: PlaybackStatus = .stopped
@@ -214,69 +231,30 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
     }
 
     func queueSong(song: Song, append: Bool = false) {
-        Task { @MainActor in
-            let queueRequest = QueueSong(song: song, append: append)
-            let encoder = JSONEncoder()
-            do {
-                let data = try encoder.encode(queueRequest)
-                let jsonString = String(data: data, encoding: .utf8)!
-                sendMessage(jsonString)
-            } catch {
-                print("Error encoding JSON: \(error)")
-            }
-        }
+        send(.queueSong(QueueSong(song: song, append: append)))
     }
     
     func queueAlbum(album: Album, append: Bool = false) {
-        Task { @MainActor in
-            let queueRequest = QueueAlbum(album: album, append: append)
-            let encoder = JSONEncoder()
-            do {
-                let data = try encoder.encode(queueRequest)
-                let jsonString = String(data: data, encoding: .utf8)!
-                sendMessage(jsonString)
-            } catch {
-                print("Error encoding JSON: \(error)")
-            }
-        }
+        send(.queueAlbum(QueueAlbum(album: album, append: append)))
     }
     
     func queuePlaylist(playlist: Playlist) {
-        Task { @MainActor in
-            let queueRequest = QueuePlaylist(playlist: playlist)
-            let encoder = JSONEncoder()
-            do {
-                let data = try encoder.encode(queueRequest)
-                let jsonString = String(data: data, encoding: .utf8)!
-                sendMessage(jsonString)
-            } catch {
-                print("Error encoding JSON: \(error)")
-            }
-        }
+        send(.queuePlaylist(QueuePlaylist(playlist: playlist)))
     }
     
     func queueStation(station: Station) {
-        Task { @MainActor in
-            let queueRequest = QueueStation(station: station)
-            let encoder = JSONEncoder()
-            do {
-                let data = try encoder.encode(queueRequest)
-                let jsonString = String(data: data, encoding: .utf8)!
-                sendMessage(jsonString)
-            } catch {
-                print("Error encoding JSON: \(error)")
-            }
-        }
+        send(.queueStation(QueueStation(station: station)))
     }
     
     func runCommand(commandType: CommandType) {
+        send(.command(CommandRequest(commandType: commandType)))
+    }
+
+    private func send(_ message: ClientMessage) {
         Task { @MainActor in
-            let commandRequest = CommandRequest(commandType: commandType)
-            let encoder = JSONEncoder()
             do {
-                let data = try encoder.encode(commandRequest)
-                let jsonString = String(data: data, encoding: .utf8)!
-                sendMessage(jsonString)
+                let data = try JSONEncoder().encode(message)
+                sendMessage(String(decoding: data, as: UTF8.self))
             } catch {
                 print("Error encoding JSON: \(error)")
             }
@@ -314,40 +292,37 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
             case .success(let message):
                 switch message {
                 case .string(let text):
-                    DispatchQueue.main.async {
-                        let jsonData = text.data(using: .utf8)!
-                        let decoder = JSONDecoder()
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
                         do {
-                            let status = try decoder.decode(StatusResponse.self, from: jsonData)
-                            self!.expand(status: status)
-                        } catch {
-                        }
-                        do {
-                            let queuestate = try decoder.decode(QueueResponse.self, from: jsonData)
-                            self!.queueChanged(queuestate: queuestate)
-                        } catch {
-                        }
-                        do {
-                            let msg = try decoder.decode(MessageResponse.self, from: jsonData)
-                            print(msg)
-                            let level: ToastLevel
-                            switch msg.level {
-                            case .success:
-                                level = .success
-                            case .error:
-                                level = .error
-                            case .warning:
-                                level = .warning
-                            case .info:
-                                level = .info
+                            let msg = try JSONDecoder().decode(ServerMessage.self, from: Data(text.utf8))
+                            switch msg {
+                            case .status(let status):
+                                self.expand(status: status)
+                            case .queue(let queuestate):
+                                self.queueChanged(queuestate: queuestate)
+                            case .message(let msg):
+                                print(msg)
+                                let level: ToastLevel
+                                switch msg.level {
+                                case .success:
+                                    level = .success
+                                case .error:
+                                    level = .error
+                                case .warning:
+                                    level = .warning
+                                case .info:
+                                    level = .info
+                                }
+                                self.toastItem = ToastItem(
+                                    level: level,
+                                    title: msg.title,
+                                    message: msg.message
+                                )
                             }
-                            self!.toastItem = ToastItem(
-                                level: level,
-                                title: msg.title,
-                                message: msg.message
-                            )
-                       } catch {
-                       }
+                        } catch {
+                            print("Failed to decode server message: \(error)")
+                        }
                     }
                 case .data(let data):
                     print("Received data: \(data.count) bytes")

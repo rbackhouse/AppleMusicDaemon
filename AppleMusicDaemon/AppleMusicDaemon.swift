@@ -76,6 +76,23 @@ public struct MessageResponse: Codable {
     let message: String
 }
 
+/// Everything a client can send. Synthesized Codable wraps each case, e.g.
+/// {"queueSong":{"_0":{"song":{...},"append":true}}} -- keep in sync with the client.
+enum ClientMessage: Codable {
+    case queueSong(QueueSong)
+    case queueAlbum(QueueAlbum)
+    case queuePlaylist(QueuePlaylist)
+    case queueStation(QueueStation)
+    case command(CommandRequest)
+}
+
+/// Everything the server can send. Keep in sync with the client.
+enum ServerMessage: Codable {
+    case status(StatusResponse)
+    case queue(QueueResponse)
+    case message(MessageResponse)
+}
+
 public struct AppleMusicService {
     func queueSong(
         song: Song,
@@ -248,42 +265,40 @@ public struct AppleMusicService {
     }
 
     enum RequestError: LocalizedError {
-        case unrecognized
+        case invalid
 
         var errorDescription: String? {
             switch self {
-            case .unrecognized: return "Unrecognized request"
+            case .invalid: return "Invalid request"
             }
         }
     }
 
-    /// Decodes one client request and runs it. Decode misses just fall through to
-    /// the next type; anything thrown by a service call propagates to the caller.
-    /// Returns nil for requests that have no reply message (player commands).
+    /// Decodes one client request and runs it. Anything thrown by a service call
+    /// propagates to the caller. Returns nil for requests with no reply message
+    /// (player commands).
     func handle(_ data: Data) async throws -> MessageResponse? {
-        let decoder = JSONDecoder()
-        if let req = try? decoder.decode(QueueSong.self, from: data) {
-            print("Received: \(req)")
+        let msg: ClientMessage
+        do {
+            msg = try JSONDecoder().decode(ClientMessage.self, from: data)
+        } catch {
+            print("Failed to decode client message: \(error)")
+            throw RequestError.invalid
+        }
+        print("Received: \(msg)")
+        switch msg {
+        case .queueSong(let req):
             return try await queueSong(song: req.song, append: req.append)
-        }
-        if let req = try? decoder.decode(QueueAlbum.self, from: data) {
-            print("Received: \(req)")
+        case .queueAlbum(let req):
             return try await queueAlbum(album: req.album, append: req.append)
-        }
-        if let req = try? decoder.decode(QueuePlaylist.self, from: data) {
-            print("Received: \(req)")
+        case .queuePlaylist(let req):
             return try await queuePlaylist(playlist: req.playlist)
-        }
-        if let req = try? decoder.decode(QueueStation.self, from: data) {
-            print("Received: \(req)")
+        case .queueStation(let req):
             return try await queueStation(station: req.station)
-        }
-        if let req = try? decoder.decode(CommandRequest.self, from: data) {
-            print("Received: \(req)")
+        case .command(let req):
             try await runCommand(request: req)
             return nil
         }
-        throw RequestError.unrecognized
     }
 }
 
@@ -336,7 +351,7 @@ class AppleMusicObservable {
         do {
             let response = QueueResponse(currentSong: currentSong, songs: songs)
             let jsonEncoder = JSONEncoder()
-            let jsonData = try jsonEncoder.encode(response)
+            let jsonData = try jsonEncoder.encode(ServerMessage.queue(response))
             let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
             
             for ws in sockets {
@@ -361,7 +376,7 @@ class AppleMusicObservable {
     func sendMessage(_ msg: MessageResponse) {
         let jsonEncoder = JSONEncoder()
         do {
-            let jsonData = try jsonEncoder.encode(msg)
+            let jsonData = try jsonEncoder.encode(ServerMessage.message(msg))
             let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
             
             for ws in sockets {
@@ -415,7 +430,7 @@ class AppleMusicObservable {
             let response = StatusResponse(playbackStatus: playbackStatus, playbackTime: playbackTime, shuffleStatus: shuffleStatus, repeatStatus: repeatStatus)
             //print(response)
             let jsonEncoder = JSONEncoder()
-            let jsonData = try jsonEncoder.encode(response)
+            let jsonData = try jsonEncoder.encode(ServerMessage.status(response))
             let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
             
             for ws in sockets {
