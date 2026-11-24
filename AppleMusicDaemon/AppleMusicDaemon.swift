@@ -467,6 +467,30 @@ class AppleMusicObservable {
     }
 }
 
+/// Constant-time comparison, so response timing doesn't leak how much of a token matched.
+private func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+    let x = Array(a.utf8), y = Array(b.utf8)
+    guard x.count == y.count else { return false }
+    var diff: UInt8 = 0
+    for i in 0..<x.count { diff |= x[i] ^ y[i] }
+    return diff == 0
+}
+
+/// Rejects requests that don't carry the shared secret as `Authorization: Bearer <token>`.
+/// Runs before the WebSocket upgrade, so a bad token gets a plain HTTP 401 the client can recognize.
+struct TokenAuthMiddleware: AsyncMiddleware {
+    let token: String
+
+    func respond(to request: Request, chainingTo next: AsyncResponder) async throws -> Response {
+        let supplied = request.headers.bearerAuthorization?.token ?? ""
+        guard constantTimeEquals(supplied, token) else {
+            print("Rejected connection from \(request.remoteAddress?.description ?? "unknown"): missing or invalid token")
+            throw Abort(.unauthorized)
+        }
+        return try await next.respond(to: request)
+    }
+}
+
 public struct AppleMusicDaemon: Sendable {
     public var addWS: (WebSocket)->Void
     public var removeWS: (WebSocket)->Void
@@ -478,8 +502,24 @@ public struct AppleMusicDaemon: Sendable {
         try routes(app)
     }
     
+    /// Shared secret clients must send as `Authorization: Bearer <token>`.
+    /// Opt-in: unset or empty leaves the server open, as before.
+    private static func authToken() -> String? {
+        let token = Environment.get("AMD_TOKEN") ?? UserDefaults.standard.string(forKey: "AMDAuthToken")
+        guard let token, !token.isEmpty else { return nil }
+        return token
+    }
+
     private func routes(_ app: Application) throws {
-        app.webSocket("amdsocket") { req, ws in
+        let root: RoutesBuilder
+        if let token = Self.authToken() {
+            root = app.grouped(TokenAuthMiddleware(token: token))
+        } else {
+            print("WARNING: no auth token configured (set AMD_TOKEN or the AMDAuthToken default); any client on the network can connect and control playback")
+            root = app
+        }
+
+        root.webSocket("amdsocket") { req, ws in
             print("WebSocket connected: \(ws)")
 
             addWS(ws)

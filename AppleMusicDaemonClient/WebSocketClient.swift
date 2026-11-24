@@ -16,12 +16,14 @@ public class AMDConfig : Identifiable, Equatable {
     var name: String
     var host: String
     var port: Int
+    var token: String?
     
-    init(name: String, host: String, port: Int) {
+    init(name: String, host: String, port: Int, token: String? = nil) {
         id = UUID()
         self.host = host
         self.port = port
         self.name = name
+        self.token = token
     }
 }
 
@@ -129,10 +131,12 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
     static let shared = WebSocketClient()
     private var queueTask: Task<Void, Never>?
     private var shouldReconnect = false
+    private var authToken: String?
 
-    func connect(url: URL) {
+    func connect(url: URL, token: String? = nil) {
         shouldReconnect = true
         self.url = url
+        self.authToken = token
         if session == nil {
             session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
         }
@@ -142,7 +146,11 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
         webSocketTask = nil
         old?.cancel(with: .goingAway, reason: nil)
 
-        webSocketTask = session.webSocketTask(with: url)
+        var request = URLRequest(url: url)
+        if let token = authToken, !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        webSocketTask = session.webSocketTask(with: request)
         webSocketTask?.resume()
         listenForMessages()
     }
@@ -170,6 +178,14 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
     // Hard failures (server down, network drop) arrive here, not in didCloseWith.
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error { print("Connection failed: \(error.localizedDescription)") }
+        if task === webSocketTask, (task.response as? HTTPURLResponse)?.statusCode == 401 {
+            shouldReconnect = false   // retrying with the same token can't succeed
+            toastItem = ToastItem(
+                level: .error,
+                title: "Authentication Failed",
+                message: "The server rejected the token."
+            )
+        }
         handleConnectionLost(task)
     }
 
@@ -182,7 +198,7 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
         guard shouldReconnect else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, self.shouldReconnect, self.webSocketTask == nil else { return }
-            self.connect(url: self.url)
+            self.connect(url: self.url, token: self.authToken)
         }
     }
 
