@@ -302,15 +302,47 @@ public struct AppleMusicService {
     }
 }
 
+/// Thread-safe set of connected sockets. add/remove arrive on NIO event loops while
+/// broadcasts come from Swift concurrency tasks, so every access goes through the lock.
+/// (A lock rather than an actor so addWS/removeWS stay synchronous and ordered.)
+final class SocketHub: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sockets: [ObjectIdentifier: WebSocket] = [:]
+
+    func add(_ ws: WebSocket) {
+        lock.withLock { sockets[ObjectIdentifier(ws)] = ws }
+    }
+
+    func remove(_ ws: WebSocket) {
+        lock.withLock { sockets[ObjectIdentifier(ws)] = nil }
+    }
+
+    /// Sends to every live socket. Fire-and-forget, so one slow client can't stall the rest.
+    func broadcast(_ text: String) {
+        for ws in liveSockets() {
+            ws.send(text)
+        }
+    }
+
+    private func liveSockets() -> [WebSocket] {
+        lock.withLock { () -> [WebSocket] in
+            // Reap sockets whose onClose we never saw (e.g. a very fast disconnect).
+            sockets = sockets.filter { !$0.value.isClosed }
+            return Array(sockets.values)
+        }
+    }
+}
+
 @Observable
 class AppleMusicObservable {
     @ObservationIgnored
-    private var sockets: [WebSocket] = []
+    private let hub = SocketHub()
     private var queueObserver: AnyCancellable?
 
     init() {
         let player = ApplicationMusicPlayer.shared
         self.queueObserver = player.queue.objectWillChange
+           .debounce(for: .milliseconds(100), scheduler: DispatchQueue.main)
            .sink { [weak self] in
                Task {
                    await self?.queueDidChange()
@@ -354,23 +386,21 @@ class AppleMusicObservable {
             let jsonData = try jsonEncoder.encode(ServerMessage.queue(response))
             let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
             
-            for ws in sockets {
-                try? await ws.send(jsonString)
-            }
+            hub.broadcast(jsonString)
         } catch {
-            
+            print("Failed to encode queue update: \(error)")
         }
     }
     
     func addWS(_ ws: WebSocket) {
-        sockets.append(ws)
+        hub.add(ws)
         Task {
             await queueDidChange()
         }
     }
     
     func removeWS(_ ws: WebSocket) {
-        sockets.removeAll { $0 === ws }
+        hub.remove(ws)
     }
         
     func sendMessage(_ msg: MessageResponse) {
@@ -379,11 +409,9 @@ class AppleMusicObservable {
             let jsonData = try jsonEncoder.encode(ServerMessage.message(msg))
             let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
             
-            for ws in sockets {
-                ws.send(jsonString)
-            }
+            hub.broadcast(jsonString)
         } catch {
-            
+            print("Failed to encode message: \(error)")
         }
     }
     
@@ -433,9 +461,7 @@ class AppleMusicObservable {
             let jsonData = try jsonEncoder.encode(ServerMessage.status(response))
             let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
             
-            for ws in sockets {
-                try? await ws.send(jsonString)
-            }
+            hub.broadcast(jsonString)
             try await Task.sleep(for: Duration.seconds(1))
         }
     }
