@@ -266,13 +266,13 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
                 print("Receive error: \(error.localizedDescription)")
                 Task { @MainActor [weak self] in
                     guard let self = self else { return }
-                    /*
+                    
                     self.toastItem = ToastItem(
                         level: .error,
                         title: "Error",
                         message: error.localizedDescription
                     )
-                    */
+                    
                     self.disconnect()
                 }
             case .success(let message):
