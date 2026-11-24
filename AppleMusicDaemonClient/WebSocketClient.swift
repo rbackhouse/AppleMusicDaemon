@@ -127,7 +127,7 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
     private var webSocketTask: URLSessionWebSocketTask?
     private var session: URLSession!
     static let shared = WebSocketClient()
-    private var isUpdating = false
+    private var queueTask: Task<Void, Never>?
     private var shouldReconnect = false
 
     func connect(url: URL) {
@@ -336,14 +336,18 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
 
     @MainActor
     func queueChanged(queuestate: QueueResponse) {
-        Task {
-            guard !isUpdating else { return }
-            isUpdating = true
+        // Newest state wins: cancel any in-flight resolve and start over, instead of
+        // dropping this update while a previous one is still hitting the network.
+        queueTask?.cancel()
+        queueTask = Task { [weak self] in
+            guard let self else { return }
 
             print("Queue changed enter")
             if !checkSong(song1: self.currentSong, song2: queuestate.currentSong) {
-                if queuestate.currentSong != nil {
-                    self.currentSong = await getSong(queuestate.currentSong!)
+                if let current = queuestate.currentSong {
+                    let resolved = await getSong(current)
+                    guard !Task.isCancelled else { return }
+                    self.currentSong = resolved
                 }
             }
             if checkQueue(queuestate: queuestate) {
@@ -351,13 +355,15 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
                 self.queue.removeAll()
                 for song in queuestate.songs {
                     let s = await getSong(song)
-                    if s != nil {
-                        self.queue.append(s!)
+                    // A newer update owns the queue now; stop touching it. (A partially
+                    // filled queue is fine: the newer update will see the mismatch and rebuild.)
+                    guard !Task.isCancelled else { return }
+                    if let s {
+                        self.queue.append(s)
                     }
                 }
             }
-            if queuestate.currentSong != nil {
-                let x = queuestate.currentSong!
+            if let x = queuestate.currentSong {
                 for i in 0..<queue.count {
                     let y = queue[i]
                     if x.title == y.title && x.albumTitle == y.albumTitle && x.artistName == y.artistName {
@@ -366,7 +372,6 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
                 }
             }
             print("Queue changed exit")
-            isUpdating = false
         }
     }
     
