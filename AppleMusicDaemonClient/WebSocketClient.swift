@@ -411,7 +411,7 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
             time = min(time, duration)
         }
         time = time.rounded(.down)
-        let duration = (currentSong?.duration ?? 100).rounded(.down)
+        let duration = (currentSong?.duration ?? 0).rounded(.down)
 
         let mins = (time / 60).rounded(.down)
         let secs = time - mins * 60
