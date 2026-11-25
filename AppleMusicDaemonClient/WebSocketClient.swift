@@ -10,31 +10,12 @@ import Combine
 import MusicKit
 import SwiftData
 
-@Model
-public class AMDConfig : Identifiable, Equatable {
-    public var id: UUID
-    var name: String
-    var host: String
-    var port: Int
-    var token: String?
-    
-    init(name: String, host: String, port: Int, token: String? = nil) {
-        id = UUID()
-        self.host = host
-        self.port = port
-        self.name = name
-        self.token = token
-    }
-}
-
 enum CommandType: String, Codable {
     case play
     case pause
     case stop
     case previous
     case next
-    case shuffle
-    case repeatsong
 }
 
 struct QueueSong: Codable {
@@ -74,9 +55,15 @@ struct StatusResponse: Codable {
     let repeatStatus: Bool
 }
 
+/// One queue slot. `id` is unique per entry, so the same song queued twice stays distinguishable.
+struct QueueEntry: Codable {
+    let id: String
+    let song: Song
+}
+
 struct QueueResponse: Codable {
-    let currentSong: Song?
-    let songs: [Song]
+    let currentEntryID: String?
+    let entries: [QueueEntry]
 }
 
 enum MessageLevel: String, Codable {
@@ -100,6 +87,8 @@ enum ClientMessage: Codable {
     case queuePlaylist(QueuePlaylist)
     case queueStation(QueueStation)
     case command(CommandRequest)
+    case setShuffle(Bool)
+    case setRepeat(Bool)
 }
 
 /// Everything the server can send. Keep in sync with the server.
@@ -130,8 +119,15 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
     private var session: URLSession!
     static let shared = WebSocketClient()
     private var queueTask: Task<Void, Never>?
+    private var queueEntryIDs: [String] = []
+    private var songCache: [MusicItemID: Song] = [:]
+    // The server only resyncs the position every few seconds; we advance it locally in between.
+    private var baseTime: Double = 0
+    private var baseDate = Date()
+    private var clockTask: Task<Void, Never>?
     private var shouldReconnect = false
     private var authToken: String?
+    private var reconnectAttempts = 0
 
     func connect(url: URL, token: String? = nil) {
         shouldReconnect = true
@@ -157,6 +153,7 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
 
     func disconnect() {
         shouldReconnect = false
+        reconnectAttempts = 0
         let task = webSocketTask
         webSocketTask = nil
         task?.cancel(with: .goingAway, reason: "Closing connection".data(using: .utf8))
@@ -167,6 +164,7 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
         guard webSocketTask === self.webSocketTask else { return }
         print("WebSocket Connected!")
         isConnected = true
+        reconnectAttempts = 0
         sendPing()
     }
 
@@ -196,7 +194,9 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
         task.cancel()
         isConnected = false
         guard shouldReconnect else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+        let delay = min(2.0 * pow(2.0, Double(reconnectAttempts)), 30.0)
+        reconnectAttempts += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.shouldReconnect, self.webSocketTask == nil else { return }
             self.connect(url: self.url, token: self.authToken)
         }
@@ -239,11 +239,11 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
     }
     
     func shuffleMode() {
-        self.runCommand(commandType: .shuffle)
+        send(.setShuffle(!isShuffleOn))
     }
     
     func repeatMode() {
-        self.runCommand(commandType: .repeatsong)
+        send(.setRepeat(!isRepeatModeOn))
     }
 
     func queueSong(song: Song, append: Bool = false) {
@@ -278,8 +278,19 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
     }
 
     func sendMessage(_ message: String) {
+        guard let task = webSocketTask else {
+            print("Send skipped: not connected")
+            Task { @MainActor in
+                self.toastItem = ToastItem(
+                    level: .warning,
+                    title: "Not Connected",
+                    message: "Couldn't reach the server. Reconnecting..."
+                )
+            }
+            return
+        }
         let message = URLSessionWebSocketTask.Message.string(message)
-        webSocketTask?.send(message) { error in
+        task.send(message) { error in
             if let error = error {
                 print("Send error: \(error.localizedDescription)")
             }
@@ -343,7 +354,7 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
                 case .data(let data):
                     print("Received data: \(data.count) bytes")
                 @unknown default:
-                    fatalError()
+                    print("Received unknown message type")
                 }
                 self?.listenForMessages()
             }
@@ -359,33 +370,17 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
             guard let self else { return }
 
             print("Queue changed enter")
-            if !checkSong(song1: self.currentSong, song2: queuestate.currentSong) {
-                if let current = queuestate.currentSong {
-                    let resolved = await getSong(current)
-                    guard !Task.isCancelled else { return }
-                    self.currentSong = resolved
-                }
-            }
-            if checkQueue(queuestate: queuestate) {
+            let ids = queuestate.entries.map(\.id)
+            if ids != self.queueEntryIDs {
                 print("Resetting Queue")
-                self.queue.removeAll()
-                for song in queuestate.songs {
-                    let s = await getSong(song)
-                    // A newer update owns the queue now; stop touching it. (A partially
-                    // filled queue is fine: the newer update will see the mismatch and rebuild.)
-                    guard !Task.isCancelled else { return }
-                    if let s {
-                        self.queue.append(s)
-                    }
-                }
+                let resolved = await self.resolveSongs(queuestate.entries.map(\.song))
+                guard !Task.isCancelled else { return }
+                self.queue = queuestate.entries.map { resolved[$0.song.id] ?? $0.song }
+                self.queueEntryIDs = ids
             }
-            if let x = queuestate.currentSong {
-                for i in 0..<queue.count {
-                    let y = queue[i]
-                    if x.title == y.title && x.albumTitle == y.albumTitle && x.artistName == y.artistName {
-                        currentIndex = i
-                    }
-                }
+            if let current = queuestate.currentEntryID, let index = ids.firstIndex(of: current) {
+                self.currentIndex = index
+                self.currentSong = self.queue[index]
             }
             print("Queue changed exit")
         }
@@ -393,70 +388,89 @@ class WebSocketClient : NSObject, ObservableObject, URLSessionWebSocketDelegate 
     
     @MainActor
     func expand(status: StatusResponse) {
-        self.playbackStatus = status.playbackStatus
-        self.playbackTime = status.playbackTime.rounded(.down)
-        self.playbackDuration =  currentSong?.duration ?? 100
-        self.playbackDuration.round(.down)
-        let mins = (self.playbackTime / 60).rounded(.down)
-        let secs = self.playbackTime - mins * 60
-        let dmins = (self.playbackDuration / 60).rounded(.down)
-        let dsecs = self.playbackDuration - dmins * 60
-        self.playbackTimeLabel = String(format: "%02d:%02d", Int(mins), Int(secs))
-        self.playbackDurationLabel = String(format: "%02d:%02d", Int(dmins), Int(dsecs))
-        self.isRepeatModeOn = status.repeatStatus
-        self.isShuffleOn = status.shuffleStatus
+        baseTime = status.playbackTime
+        baseDate = Date()
+        // Assign only on change so unchanged fields don't republish.
+        if playbackStatus != status.playbackStatus { playbackStatus = status.playbackStatus }
+        if isRepeatModeOn != status.repeatStatus { isRepeatModeOn = status.repeatStatus }
+        if isShuffleOn != status.shuffleStatus { isShuffleOn = status.shuffleStatus }
+        refreshClock()
+        if clockTask == nil {
+            startClock()
+        }
     }
-    
-    func checkSong(song1: Song?, song2: Song?) -> Bool {
-        if song1 == nil {
-            return false
+
+    /// Recomputes position and labels from the last server sync plus elapsed local time.
+    @MainActor
+    private func refreshClock() {
+        var time = baseTime
+        if playbackStatus == .playing {
+            time += Date().timeIntervalSince(baseDate)
         }
-        if song2 == nil {
-            return false
+        if let duration = currentSong?.duration {
+            time = min(time, duration)
         }
-        let x = song1!
-        let y = song2!
-        if x.title != y.title || x.albumTitle != y.albumTitle || x.artistName != y.artistName {
-            return false
-        }
-        return true
+        time = time.rounded(.down)
+        let duration = (currentSong?.duration ?? 100).rounded(.down)
+
+        let mins = (time / 60).rounded(.down)
+        let secs = time - mins * 60
+        let dmins = (duration / 60).rounded(.down)
+        let dsecs = duration - dmins * 60
+        let timeLabel = String(format: "%02d:%02d", Int(mins), Int(secs))
+        let durationLabel = String(format: "%02d:%02d", Int(dmins), Int(dsecs))
+
+        if playbackTime != time { playbackTime = time }
+        if playbackDuration != duration { playbackDuration = duration }
+        if playbackTimeLabel != timeLabel { playbackTimeLabel = timeLabel }
+        if playbackDurationLabel != durationLabel { playbackDurationLabel = durationLabel }
     }
-    
-    func checkQueue(queuestate: QueueResponse) -> Bool {
-        if queue.count != queuestate.songs.count {
-            return true
-        }
-        for i in 0..<queue.count {
-            if checkSong(song1: queue[i], song2: queuestate.songs[i]) == false {
-                return true
+
+    @MainActor
+    private func startClock() {
+        clockTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self else { return }
+                if self.isConnected && self.playbackStatus == .playing {
+                    self.refreshClock()
+                }
             }
         }
-        return false
     }
     
-    func getSong(_ song: Song) async -> Song? {
-        do {
-            var req = MusicCatalogResourceRequest<Song>(matching: \.id, equalTo: song.id)
-            req.limit = 1
-            let resp = try await req.response()
-            if resp.items.isEmpty == false {
-                return resp.items.first
+    /// Resolves songs to full catalog objects with one request per 25 ids, caching by id.
+    /// Anything the catalog doesn't know (e.g. library-only songs) is simply left out of the
+    /// result, and callers fall back to the song they were sent.
+    @MainActor
+    private func resolveSongs(_ songs: [Song]) async -> [MusicItemID: Song] {
+        var result: [MusicItemID: Song] = [:]
+        var missing: [MusicItemID] = []
+        for song in songs {
+            if let cached = songCache[song.id] {
+                result[song.id] = cached
+            } else if !missing.contains(song.id) {
+                missing.append(song.id)
             }
-        } catch {
-            print("Failed to get song with title: \(song.title) artist: \(song.artistName) error: \(error)")
+        }
+
+        var start = 0
+        while start < missing.count {
+            if Task.isCancelled { break }
+            let chunk = Array(missing[start..<min(start + 25, missing.count)])
+            start += 25
             do {
-                let term = song.title + " by " + song.artistName
-                var req = MusicCatalogSearchRequest(term: term, types: [Song.self])
-                req.limit = 1
-                let resp = try await req.response()
-                if resp.songs.isEmpty == false {
-                    return resp.songs.first
+                let request = MusicCatalogResourceRequest<Song>(matching: \.id, memberOf: chunk)
+                let response = try await request.response()
+                for song in response.items {
+                    result[song.id] = song
+                    songCache[song.id] = song
                 }
             } catch {
-                print("Failed to get song via search with title: \(song.title) artist: \(song.artistName) error: \(error)")
+                print("Batch song lookup failed: \(error)")
             }
         }
-        return song
+        return result
     }
 }
 

@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F62D79FA30B75B4D00685F45 /* AMDConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = F62D79F930B75B4D00685F45 /* AMDConfig.swift */; };
 		F65C71D62F38B8D200BBF870 /* MusicItemCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = F65C71C02F38B8D100BBF870 /* MusicItemCell.swift */; };
 		F65C71D82F38B8D200BBF870 /* BonjourResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = F65C71C22F38B8D100BBF870 /* BonjourResolver.swift */; };
 		F65C71D92F38B8D200BBF870 /* LibraryRecentlyPlayed.swift in Sources */ = {isa = PBXBuildFile; fileRef = F65C71C32F38B8D100BBF870 /* LibraryRecentlyPlayed.swift */; };
@@ -31,6 +32,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		F62D79F930B75B4D00685F45 /* AMDConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AMDConfig.swift; path = AppleMusicDaemonClient/AMDConfig.swift; sourceTree = "<group>"; };
 		F65C71C02F38B8D100BBF870 /* MusicItemCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MusicItemCell.swift; path = AppleMusicDaemonClient/MusicItemCell.swift; sourceTree = "<group>"; };
 		F65C71C12F38B8D100BBF870 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ContentView.swift; path = AppleMusicDaemonClient/ContentView.swift; sourceTree = "<group>"; };
 		F65C71C22F38B8D100BBF870 /* BonjourResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = BonjourResolver.swift; path = AppleMusicDaemonClient/BonjourResolver.swift; sourceTree = "<group>"; };
@@ -91,6 +93,7 @@
 		F66F7C0A2F0AF52F00CD8E96 = {
 			isa = PBXGroup;
 			children = (
+				F62D79F930B75B4D00685F45 /* AMDConfig.swift */,
 				F65C71C82F38B8D100BBF870 /* AlbumCell.swift */,
 				F65C71C72F38B8D100BBF870 /* ArtistAlbumCell.swift */,
 				F65C71D42F38B8D200BBF870 /* ArtistCell.swift */,
@@ -200,6 +203,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F62D79FA30B75B4D00685F45 /* AMDConfig.swift in Sources */,
 				F65C71D62F38B8D200BBF870 /* MusicItemCell.swift in Sources */,
 				F65C71D82F38B8D200BBF870 /* BonjourResolver.swift in Sources */,
 				F65C71D92F38B8D200BBF870 /* LibraryRecentlyPlayed.swift in Sources */,

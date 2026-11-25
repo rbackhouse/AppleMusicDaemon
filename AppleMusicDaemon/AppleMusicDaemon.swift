@@ -17,8 +17,6 @@ enum CommandType: String, Codable {
     case stop
     case previous
     case next
-    case shuffle
-    case repeatsong
 }
 
 struct QueueSong: Codable {
@@ -58,9 +56,15 @@ struct StatusResponse: Codable {
     let repeatStatus: Bool
 }
 
+/// One queue slot. `id` is unique per entry, so the same song queued twice stays distinguishable.
+struct QueueEntry: Codable {
+    let id: String
+    let song: Song
+}
+
 struct QueueResponse: Codable {
-    let currentSong: Song?
-    let songs: [Song]
+    let currentEntryID: String?
+    let entries: [QueueEntry]
 }
 
 enum MessageLevel: String, Codable {
@@ -84,6 +88,8 @@ enum ClientMessage: Codable {
     case queuePlaylist(QueuePlaylist)
     case queueStation(QueueStation)
     case command(CommandRequest)
+    case setShuffle(Bool)
+    case setRepeat(Bool)
 }
 
 /// Everything the server can send. Keep in sync with the client.
@@ -108,6 +114,12 @@ public struct AppleMusicService {
             return MessageResponse(level: .success, title: "Song Queued", message: "\(song.title) queued to play from library append = \(append)")
         } else {
             print("song not found in library \(song.title) searching catalog")
+            // The song usually came from the catalog, so its id works directly.
+            let byID = MusicCatalogResourceRequest<Song>(matching: \.id, equalTo: song.id)
+            if let found = try? await byID.response().items.first {
+                try await _queueSong(found, append: append)
+                return MessageResponse(level: .success, title: "Song Queued", message: "\(song.title) queued to play from catalog append = \(append)")
+            }
             var catreq = MusicCatalogSearchRequest(term: song.title, types: [Song.self])
             catreq.limit = 25
             let catresp = try await catreq.response()
@@ -157,8 +169,7 @@ public struct AppleMusicService {
         let response = try await request.response()
         if response.items.count > 0 {
             print("album found in library \(album.title)")
-            let albums = response.items.prefix(1)
-            try await _queueAlbum(albums[0], append: append)
+            try await _queueAlbum(response.items[0], append: append)
             return MessageResponse(level: .success, title: "Album Queued", message: "\(album.title) queued to play from library append = \(append)")
         } else {
             print("album not found in library \(album.title) searching catalog")
@@ -166,16 +177,16 @@ public struct AppleMusicService {
             catreq.limit = 25
             let catresp = try await catreq.response()
             if catresp.albums.count > 0 {
-                print("\(catresp.albums.count) matching songs found in catalog for \(album.title)")
+                print("\(catresp.albums.count) matching albums found in catalog for \(album.title)")
                 let filteredAlbums = catresp.albums.filter { a in
                     print("filtered \(a.title)) \(a.artistName)")
                     return a.title == album.title && a.artistName == album.artistName
                 }
                 if !filteredAlbums.isEmpty {
                     print("album found in catalog \(album.title)")
-                    let album = filteredAlbums[0]
-                    try await _queueAlbum(album, append: append)
-                    return MessageResponse(level: .success, title: "Album Queued", message: "\(album.title) queued to play from catalog append = \(append)")
+                    let matched = filteredAlbums[0]
+                    try await _queueAlbum(matched, append: append)
+                    return MessageResponse(level: .success, title: "Album Queued", message: "\(matched.title) queued to play from catalog append = \(append)")
                 } else {
                     return MessageResponse(level: .error, title: "Album Queue Failed", message: "Album \(album.title) not found failed to be queued to play")
                 }
@@ -203,13 +214,18 @@ public struct AppleMusicService {
     func queuePlaylist(
         playlist: Playlist
     ) async throws -> MessageResponse {
-        var request = MusicLibraryRequest<Playlist>.init()
-        request.filter(matching: \.name, equalTo: playlist.name)
-        let response = try await request.response()
+        var byID = MusicLibraryRequest<Playlist>()
+        byID.filter(matching: \.id, equalTo: playlist.id)
+        var response = try await byID.response()
+        if response.items.isEmpty {
+            // The id may be a catalog id that doesn't exist in the library; fall back to the name.
+            var byName = MusicLibraryRequest<Playlist>()
+            byName.filter(matching: \.name, equalTo: playlist.name)
+            response = try await byName.response()
+        }
         if response.items.count > 0 {
-            let playlists = response.items.prefix(1)
             let player = ApplicationMusicPlayer.shared
-            player.queue = [playlists[0]]
+            player.queue = [response.items[0]]
             try await player.prepareToPlay()
             return MessageResponse(level: .success, title: "Playlist Queued", message: "\(playlist.name) queued to play")
         } else {
@@ -224,9 +240,8 @@ public struct AppleMusicService {
 
         let response = try await request.response()
         if response.items.count > 0 {
-            let stations = response.items.prefix(1)
             let player = ApplicationMusicPlayer.shared
-            player.queue = [stations[0]]
+            player.queue = [response.items[0]]
             try await player.prepareToPlay()
             return MessageResponse(level: .success, title: "Station Queued", message: "\(station.name) queued to play")
         } else {
@@ -249,19 +264,16 @@ public struct AppleMusicService {
             case .stop:
                 player.stop()
                 player.restartCurrentEntry()
-            case .shuffle:
-                if player.state.shuffleMode == .off {
-                    player.state.shuffleMode = .songs
-                } else {
-                    player.state.shuffleMode = .off
-                }
-            case .repeatsong:
-                if player.state.repeatMode == MusicPlayer.RepeatMode.none {
-                    player.state.repeatMode = .all
-                } else {
-                    player.state.repeatMode = MusicPlayer.RepeatMode.none
-                }
         }
+    }
+
+    /// Explicit rather than toggling, so a client with stale UI state can't flip the wrong way.
+    func setShuffle(_ on: Bool) {
+        ApplicationMusicPlayer.shared.state.shuffleMode = on ? .songs : .off
+    }
+
+    func setRepeat(_ on: Bool) {
+        ApplicationMusicPlayer.shared.state.repeatMode = on ? .all : MusicPlayer.RepeatMode.none
     }
 
     enum RequestError: LocalizedError {
@@ -298,6 +310,12 @@ public struct AppleMusicService {
         case .command(let req):
             try await runCommand(request: req)
             return nil
+        case .setShuffle(let on):
+            setShuffle(on)
+            return nil
+        case .setRepeat(let on):
+            setRepeat(on)
+            return nil
         }
     }
 }
@@ -324,6 +342,10 @@ final class SocketHub: @unchecked Sendable {
         }
     }
 
+    var isEmpty: Bool {
+        lock.withLock { sockets.isEmpty }
+    }
+
     private func liveSockets() -> [WebSocket] {
         lock.withLock { () -> [WebSocket] in
             // Reap sockets whose onClose we never saw (e.g. a very fast disconnect).
@@ -338,6 +360,7 @@ class AppleMusicObservable {
     @ObservationIgnored
     private let hub = SocketHub()
     private var queueObserver: AnyCancellable?
+    private var stateObserver: AnyCancellable?
 
     init() {
         let player = ApplicationMusicPlayer.shared
@@ -346,47 +369,37 @@ class AppleMusicObservable {
            .sink { [weak self] in
                Task {
                    await self?.queueDidChange()
+                   self?.broadcastStatus()
                }
+           }
+        self.stateObserver = player.state.objectWillChange
+           .debounce(for: .milliseconds(100), scheduler: DispatchQueue.main)
+           .sink { [weak self] in
+               self?.broadcastStatus()
            }
     }
     
-    private func queueDidChange() async {
+    private func queueDidChange(to target: WebSocket? = nil) async {
         print("queueDidChange")
         let player = ApplicationMusicPlayer.shared
-        var currentSong: Song? = nil
-        if let currentEntry = player.queue.currentEntry?.item {
-            switch currentEntry {
-            case .song(let s):
-                currentSong = s
-            case .musicVideo(_):
-                break
-            @unknown default:
-                break
-            }
+        let entries: [QueueEntry] = player.queue.entries.compactMap { entry in
+            guard case .song(let song)? = entry.item else { return nil }   // music videos are skipped
+            return QueueEntry(id: entry.id, song: song)
         }
-        var songs: [Song] = []
-        
-        for item in player.queue.entries {
-            if item.item != nil {
-                switch item.item {
-                case .song(let s):
-                    songs.append(s)
-                case .musicVideo(_):
-                    break
-                case .none:
-                    break
-                @unknown default:
-                    break
-                }
-            }
-        }
+        // Only name a current entry the client can actually find in the list we send.
+        let currentID = player.queue.currentEntry?.id
+        let currentEntryID = entries.contains { $0.id == currentID } ? currentID : nil
         do {
-            let response = QueueResponse(currentSong: currentSong, songs: songs)
+            let response = QueueResponse(currentEntryID: currentEntryID, entries: entries)
             let jsonEncoder = JSONEncoder()
             let jsonData = try jsonEncoder.encode(ServerMessage.queue(response))
             let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
             
-            hub.broadcast(jsonString)
+            if let target {
+                try? await target.send(jsonString)
+            } else {
+                hub.broadcast(jsonString)
+            }
         } catch {
             print("Failed to encode queue update: \(error)")
         }
@@ -395,7 +408,8 @@ class AppleMusicObservable {
     func addWS(_ ws: WebSocket) {
         hub.add(ws)
         Task {
-            await queueDidChange()
+            await queueDidChange(to: ws)
+            broadcastStatus(to: ws)
         }
     }
     
@@ -415,56 +429,72 @@ class AppleMusicObservable {
         }
     }
     
-    func startTimer() async throws {
-        while true {
-            let player = ApplicationMusicPlayer.shared
-            let playbackTime = player.playbackTime
-            var playbackStatus: PlaybackStatus
-            switch player.state.playbackStatus {
-                case .playing:
-                    playbackStatus = .playing
-                case .stopped:
-                    playbackStatus = .stopped
-                case .paused:
-                    playbackStatus = .paused
-                case .seekingForward:
-                    playbackStatus = .seekingforward
-                case .seekingBackward:
-                    playbackStatus = .seekingbackward
-                default:
-                    playbackStatus = .stopped
-            }
-            var repeatStatus: Bool = false
-            switch player.state.repeatMode {
-                case .some(.none):
-                    repeatStatus = false
-                case .some(_):
-                    repeatStatus = true
-                case nil:
-                    repeatStatus = false
-            }
-            var shuffleStatus: Bool = false
-            switch player.state.shuffleMode {
-                case .off:
-                    shuffleStatus = false
-                case .songs:
-                    shuffleStatus = true
-                case .none:
-                    shuffleStatus = false
-                case .some(_):
-                    shuffleStatus = true
-            }
+    private func currentStatus() -> StatusResponse {
+        let player = ApplicationMusicPlayer.shared
+        var playbackStatus: PlaybackStatus
+        switch player.state.playbackStatus {
+            case .playing:
+                playbackStatus = .playing
+            case .stopped:
+                playbackStatus = .stopped
+            case .paused:
+                playbackStatus = .paused
+            case .seekingForward:
+                playbackStatus = .seekingforward
+            case .seekingBackward:
+                playbackStatus = .seekingbackward
+            default:
+                playbackStatus = .stopped
+        }
+        var repeatStatus: Bool = false
+        switch player.state.repeatMode {
+            case .some(.none):
+                repeatStatus = false
+            case .some(_):
+                repeatStatus = true
+            case nil:
+                repeatStatus = false
+        }
+        var shuffleStatus: Bool = false
+        switch player.state.shuffleMode {
+            case .off:
+                shuffleStatus = false
+            case .songs:
+                shuffleStatus = true
+            case .none:
+                shuffleStatus = false
+            case .some(_):
+                shuffleStatus = true
+        }
+        return StatusResponse(playbackStatus: playbackStatus, playbackTime: player.playbackTime, shuffleStatus: shuffleStatus, repeatStatus: repeatStatus)
+    }
 
-            let response = StatusResponse(playbackStatus: playbackStatus, playbackTime: playbackTime, shuffleStatus: shuffleStatus, repeatStatus: repeatStatus)
-            //print(response)
-            let jsonEncoder = JSONEncoder()
-            let jsonData = try jsonEncoder.encode(ServerMessage.status(response))
-            let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
-            
-            hub.broadcast(jsonString)
-            try await Task.sleep(for: Duration.seconds(1))
+    private func broadcastStatus(to target: WebSocket? = nil) {
+        guard let text = encodeServerMessage(.status(currentStatus())) else { return }
+        if let target {
+            target.send(text)
+        } else {
+            hub.broadcast(text)
         }
     }
+
+    /// Status is pushed whenever player state or the queue changes. This slow tick only
+    /// resyncs the playback position (clients advance it locally in between), and it does
+    /// no work while nobody is connected.
+    func startTimer() async throws {
+        while true {
+            if !hub.isEmpty {
+                broadcastStatus()
+            }
+            try await Task.sleep(for: Duration.seconds(5))
+        }
+    }
+}
+
+/// Encodes one server message as the JSON text frame clients expect.
+private func encodeServerMessage(_ message: ServerMessage) -> String? {
+    guard let data = try? JSONEncoder().encode(message) else { return nil }
+    return String(data: data, encoding: .utf8)
 }
 
 /// Constant-time comparison, so response timing doesn't leak how much of a token matched.
@@ -522,23 +552,27 @@ public struct AppleMusicDaemon: Sendable {
         root.webSocket("amdsocket") { req, ws in
             print("WebSocket connected: \(ws)")
 
+            ws.pingInterval = .seconds(15)
             addWS(ws)
             
             ws.onText { ws, text async in
                 let jsonData = Data(text.utf8)
 
                 Task { @MainActor in
+                    let reply: MessageResponse?
                     do {
-                        if let msg = try await AppleMusicService().handle(jsonData) {
-                            sendMessage(msg)
-                        }
+                        reply = try await AppleMusicService().handle(jsonData)
                     } catch {
                         print("Request failed: \(error)")
-                        sendMessage(MessageResponse(
+                        reply = MessageResponse(
                             level: .error,
                             title: "Request Failed",
                             message: error.localizedDescription
-                        ))
+                        )
+                    }
+                    // Toasts go to whoever asked; queue and status changes are still broadcast.
+                    if let reply, let text = encodeServerMessage(.message(reply)) {
+                        try? await ws.send(text)
                     }
                 }
             }
