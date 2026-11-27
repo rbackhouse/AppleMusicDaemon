@@ -46,8 +46,8 @@ struct ContentView: View {
             )
             
             MessageView()
-            .toast($currentToast)
         }
+        .toast($currentToast)
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
                 PlaybackControlsToolbar(isShowingSheet: $isShowingSheet)
