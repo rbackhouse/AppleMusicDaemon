@@ -224,6 +224,7 @@ struct PlaybackControlsToolbar: View {
                 }
             }) {
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .frame(width: 16)
             }
             .help(isPlaying ? "Pause" : "Play")
             .keyboardShortcut(.space, modifiers: [])
@@ -253,12 +254,15 @@ struct NowPlayingToolbarInfo: View {
     @State private var showingPopover = false
     
     var body: some View {
-        if let currentTrack = client.currentSong {
-            Button(action: {
-                showingPopover.toggle()
-            }) {
-                HStack(spacing: 8) {
-                    if let artwork = currentTrack.artwork {
+        let currentTrack = client.currentSong
+
+        Button(action: {
+            showingPopover.toggle()
+        }) {
+            HStack(spacing: 8) {
+                // Always reserve the artwork slot
+                Group {
+                    if let artwork = currentTrack?.artwork {
                         AsyncImage(url: artwork.url(width: 32, height: 32)) { image in
                             image
                                 .resizable()
@@ -267,29 +271,36 @@ struct NowPlayingToolbarInfo: View {
                             Rectangle()
                                 .fill(Color.gray.opacity(0.3))
                         }
-                        .frame(width: 32, height: 32)
-                        .cornerRadius(4)
+                    } else {
+                        Rectangle()
+                            .fill(Color.gray.opacity(0.3))
                     }
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(currentTrack.title)
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .lineLimit(1)
-                        Text(currentTrack.artistName)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: 200)
                 }
+                .frame(width: 32, height: 32)
+                .cornerRadius(4)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(currentTrack?.title ?? "Not Playing")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    // A space keeps the second line's height when empty
+                    Text(currentTrack?.artistName ?? " ")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .frame(width: 180, alignment: .leading)
             }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showingPopover) {
-                NowPlayingPopover()
-                    .environmentObject(client)
-                    .frame(width: 400, height: 500)
-            }
+        }
+        .buttonStyle(.plain)
+        .disabled(currentTrack == nil)
+        .popover(isPresented: $showingPopover) {
+            NowPlayingPopover()
+                .environmentObject(client)
+                .frame(width: 400, height: 500)
         }
     }
 }
