@@ -513,7 +513,7 @@ struct TokenAuthMiddleware: AsyncMiddleware {
 
     func respond(to request: Request, chainingTo next: AsyncResponder) async throws -> Response {
         let supplied = request.headers.bearerAuthorization?.token ?? ""
-        guard constantTimeEquals(supplied, token) else {
+        guard await constantTimeEquals(supplied, token) else {
             print("Rejected connection from \(request.remoteAddress?.description ?? "unknown"): missing or invalid token")
             throw Abort(.unauthorized)
         }
